@@ -1,3 +1,6 @@
+# ⚠️ 此文件已合并到 prepare_data.py，建议使用新文件。
+# This file has been consolidated into prepare_data.py.
+
 import pandas as pd
 
 # 读取第一个文件

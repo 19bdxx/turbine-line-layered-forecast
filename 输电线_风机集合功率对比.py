@@ -1,3 +1,6 @@
+# ⚠️ 此文件已重构为 compare_power.py，建议使用新文件。
+# This file has been refactored into compare_power.py.
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
