@@ -21,14 +21,20 @@
 
 ```
 turbine-line-layered-forecast/
-├── prepare_data.py   # 数据准备：清洗原始数据 + 联合重复段质量检查
-├── forecast.py       # 预测管道：全局预测 + 单机预测 + 线损分析（支持 6 种模型）
-└── compare_power.py  # 可视化分析：风机集合功率 vs 输电线实测功率
+├── src/                              # 新版代码（推荐使用）
+│   ├── prepare_data.py               #   数据准备：清洗原始数据 + 联合重复段质量检查
+│   ├── forecast.py                   #   预测管道：全局预测 + 单机预测 + 线损分析（支持 6 种模型）
+│   └── compare_power.py              #   可视化分析：风机集合功率 vs 输电线实测功率
+├── legacy/                           # 旧版代码（保留以供参考，已标注弃用）
+│   ├── #0构建数据集.py               #   → 已合并至 src/prepare_data.py
+│   ├── #1检查重复时间.py              #   → 已合并至 src/prepare_data.py
+│   ├── 全局预测.py                   #   → 已合并至 src/forecast.py
+│   ├── demo2.py                      #   → 已合并至 src/forecast.py
+│   ├── 预测结果汇总.py               #   → 已合并至 src/forecast.py
+│   ├── 预测结果分析.py               #   → 已合并至 src/forecast.py
+│   └── 输电线_风机集合功率对比.py    #   → 已重构至 src/compare_power.py
+└── README.md
 ```
-
-> **旧版文件**（`#0构建数据集.py`、`#1检查重复时间.py`、`全局预测.py`、`demo2.py`、
-> `预测结果汇总.py`、`预测结果分析.py`、`输电线_风机集合功率对比.py`）已保留以供参考，
-> 顶部有弃用说明，功能均已合并到上述三个文件中。
 
 ---
 
@@ -47,7 +53,7 @@ pip install torch
 ### 步骤 1：数据准备
 
 ```bash
-python prepare_data.py
+python src/prepare_data.py
 ```
 
 - 读取原始 CSV，过滤重复时间戳，选取所需列，保存清洗后数据集
@@ -56,7 +62,7 @@ python prepare_data.py
 ### 步骤 2：多模型预测（核心）
 
 ```bash
-python forecast.py
+python src/forecast.py
 ```
 
 对 `MODELS` 列表中的每个模型 × 每个预测步长 `N`，自动完成：
@@ -67,7 +73,7 @@ python forecast.py
 ### 步骤 3：功率对比分析（可选）
 
 ```bash
-python compare_power.py
+python src/compare_power.py
 ```
 
 对比风机功率求和与线路实测功率，生成误差分布统计及可视化图表。
@@ -80,13 +86,13 @@ python compare_power.py
 
 | 脚本 | 环境变量 | 说明 |
 |------|---------|------|
-| `prepare_data.py` | `RAW_DATA_FILE` | 原始数据路径 |
-| `prepare_data.py` | `DUPLICATE_TS_FILE` | 重复时间戳文件路径 |
-| `prepare_data.py` | `CLEAN_OUTPUT_FILE` | 清洗结果输出路径 |
-| `forecast.py` | `DATA_FILE` | 清洗后数据路径 |
-| `forecast.py` | `OUTPUT_ROOT` | 预测结果输出根目录 |
-| `forecast.py` | `LINE_LOSS_FILE` | 线损查找表路径 |
-| `compare_power.py` | `DATA_FILE` | 清洗后数据路径 |
+| `src/prepare_data.py` | `RAW_DATA_FILE` | 原始数据路径 |
+| `src/prepare_data.py` | `DUPLICATE_TS_FILE` | 重复时间戳文件路径 |
+| `src/prepare_data.py` | `CLEAN_OUTPUT_FILE` | 清洗结果输出路径 |
+| `src/forecast.py` | `DATA_FILE` | 清洗后数据路径 |
+| `src/forecast.py` | `OUTPUT_ROOT` | 预测结果输出根目录 |
+| `src/forecast.py` | `LINE_LOSS_FILE` | 线损查找表路径 |
+| `src/compare_power.py` | `DATA_FILE` | 清洗后数据路径 |
 
 在 `forecast.py` 中，可通过修改 `MODELS` 列表控制启用哪些模型：
 
@@ -173,10 +179,10 @@ MODELS = [
 ```
 原始数据
    │
-   ▼ prepare_data.py
+   ▼ src/prepare_data.py
 数据清洗（去重、过滤停机、对齐时间戳）
    │
-   ▼ forecast.py（对每种模型重复以下流程）
+   ▼ src/forecast.py（对每种模型重复以下流程）
    ├──► 全局预测（直接预测线路总功率）
    │
    └──► 单机预测（每台风机独立建模）
