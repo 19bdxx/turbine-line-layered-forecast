@@ -99,23 +99,28 @@ def build_global_dataset(
     ws_mean = df[ws_cols].to_numpy().mean(axis=1)
     ap = df["ACTIVE_POWER_BING_PROCESS"].to_numpy()
 
+    # 预建时间戳哈希索引，O(1) 查找目标时间行，替代逐窗口全表过滤
+    ts_to_idx: dict = {ts: idx for idx, ts in enumerate(timestamps)}
+    # 末尾 N 步的窗口起点必然找不到目标，提前缩小上界避免无效循环
+    upper = max(0, len(df) - M - N + 1)
+
     features_list, targets_list, ts_list = [], [], []
     skipped = 0
 
-    for i in range(len(df) - M + 1):
+    for i in range(upper):
         if not check_time_continuity(timestamps[i : i + M], time_gap_seconds):
             skipped += 1
             continue
         target_time = timestamps[i + M - 1] + pd.Timedelta(seconds=N * time_gap_seconds)
-        match = df[df["timestamp"] == target_time]
-        if match.empty:
+        target_idx = ts_to_idx.get(target_time)
+        if target_idx is None:
             skipped += 1
             continue
         flat = []
         for step in range(M):
             flat.extend([ws_mean[i + step], ap[i + step]])
         features_list.append(flat)
-        targets_list.append(float(match.iloc[0]["ACTIVE_POWER_BING_PROCESS"]))
+        targets_list.append(float(ap[target_idx]))
         ts_list.append(target_time)
 
     print(f"  ⏳ 全局数据集：跳过 {skipped} 个无效窗口，有效样本 {len(features_list)} 个")
@@ -144,23 +149,28 @@ def build_turbine_dataset(
     ap = df[ap_col].to_numpy()
     ws = df[ws_col].to_numpy()
 
+    # 预建时间戳哈希索引，O(1) 查找目标时间行，替代逐窗口全表过滤
+    ts_to_idx: dict = {ts: idx for idx, ts in enumerate(timestamps)}
+    # 末尾 N 步的窗口起点必然找不到目标，提前缩小上界避免无效循环
+    upper = max(0, len(df) - M - N + 1)
+
     features_list, targets_list, ts_list = [], [], []
     skipped = 0
 
-    for i in range(len(df) - M + 1):
+    for i in range(upper):
         if not check_time_continuity(timestamps[i : i + M], time_gap_seconds):
             skipped += 1
             continue
         target_time = timestamps[i + M - 1] + pd.Timedelta(seconds=N * time_gap_seconds)
-        match = df[df["timestamp"] == target_time]
-        if match.empty:
+        target_idx = ts_to_idx.get(target_time)
+        if target_idx is None:
             skipped += 1
             continue
         flat = []
         for step in range(M):
             flat.extend([ap[i + step], ws[i + step]])
         features_list.append(flat)
-        targets_list.append(float(match.iloc[0][ap_col]))
+        targets_list.append(float(ap[target_idx]))
         ts_list.append(target_time)
 
     print(f"  ⏳ 风机 {turbine_id}：跳过 {skipped} 个无效窗口，有效样本 {len(features_list)} 个")
@@ -274,6 +284,7 @@ def _train_mlp(
         max_iter=500,
         early_stopping=True,       # 内部从训练集划分验证集
         validation_fraction=0.1,
+        shuffle=False,             # 保持时间序列顺序，取末尾 10% 作验证
         n_iter_no_change=20,
         random_state=RANDOM_SEED,
         verbose=False,
@@ -292,7 +303,7 @@ def _train_lstm(
 ) -> Tuple[object, Callable]:
     """
     使用 PyTorch 训练双层 LSTM 模型。
-    输入特征被重塑为 (samples, M, 2) 的时序格式。
+    输入特征被重塑为 (samples, M, 2) 的时序格式，训练前做 StandardScaler 归一化。
     需要安装 PyTorch：pip install torch
     """
     try:
@@ -303,10 +314,16 @@ def _train_lstm(
         raise ImportError("LSTM 模型需要 PyTorch，请运行: pip install torch")
 
     torch.manual_seed(RANDOM_SEED)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_size = 2  # 每个时间步有 2 个特征
 
+    # 归一化：仅在训练集拟合，再应用到验证集
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_tr)
+    X_val = scaler.transform(X_val)
+
     def to_tensor(X: np.ndarray) -> "torch.Tensor":
-        return torch.tensor(X.reshape(-1, M, input_size), dtype=torch.float32)
+        return torch.tensor(X.reshape(-1, M, input_size), dtype=torch.float32).to(device)
 
     class LSTMNet(nn.Module):
         def __init__(self) -> None:
@@ -324,14 +341,14 @@ def _train_lstm(
             out, _ = self.lstm(x)
             return self.fc(out[:, -1, :]).squeeze(-1)
 
-    model = LSTMNet()
+    model = LSTMNet().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = nn.MSELoss()
 
     X_tr_t = to_tensor(X_tr)
-    y_tr_t = torch.tensor(y_tr, dtype=torch.float32)
+    y_tr_t = torch.tensor(y_tr, dtype=torch.float32).to(device)
     X_val_t = to_tensor(X_val)
-    y_val_t = torch.tensor(y_val, dtype=torch.float32)
+    y_val_t = torch.tensor(y_val, dtype=torch.float32).to(device)
 
     loader = DataLoader(TensorDataset(X_tr_t, y_tr_t), batch_size=256, shuffle=True)
 
@@ -367,9 +384,9 @@ def _train_lstm(
 
     def predict(X: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            return model(to_tensor(X)).numpy()
+            return model(to_tensor(scaler.transform(X))).cpu().numpy()
 
-    return model, predict
+    return (model, scaler), predict
 
 
 def train_model(
@@ -407,10 +424,14 @@ def train_model(
 # ============================================================
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    rmse = float(root_mean_squared_error(y_true, y_pred))
+    mean_abs_true = float(np.mean(np.abs(y_true)))
+    nrmse = rmse / mean_abs_true if mean_abs_true > 0 else float("nan")
     return {
-        "RMSE": float(root_mean_squared_error(y_true, y_pred)),
+        "RMSE": rmse,
         "MAE": float(mean_absolute_error(y_true, y_pred)),
         "R2": float(r2_score(y_true, y_pred)),
+        "NRMSE": nrmse,  # 归一化均方根误差（按真值绝对值均值归一化）
     }
 
 
@@ -439,7 +460,7 @@ def save_predictions(
 # ============================================================
 
 def run_global_forecast(
-    df: pd.DataFrame, model_name: str, M: int, N: int, output_root: str
+    df: pd.DataFrame, model_name: str, M: int, N: int, output_root: str, exp_id: str
 ) -> None:
     """对输电线聚合功率直接建模，保存指标与预测结果。"""
     print(f"\n{'=' * 60}")
@@ -463,10 +484,10 @@ def run_global_forecast(
     y_pred = np.clip(predict_fn(X_val), 0, None)
     m = compute_metrics(y_val, y_pred)
     print(
-        f"  ✅ RMSE={m['RMSE']:.2f} | MAE={m['MAE']:.2f} | R²={m['R2']:.4f} | 耗时 {elapsed:.1f}s"
+        f"  ✅ RMSE={m['RMSE']:.2f} | MAE={m['MAE']:.2f} | R²={m['R2']:.4f}"
+        f" | NRMSE={m['NRMSE']:.4f} | 耗时 {elapsed:.1f}s"
     )
 
-    exp_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_dir = os.path.join(output_root, "global", model_name)
 
     save_metrics(
@@ -487,7 +508,7 @@ def run_global_forecast(
 # ============================================================
 
 def run_turbine_forecast(
-    df: pd.DataFrame, model_name: str, M: int, N: int, output_root: str
+    df: pd.DataFrame, model_name: str, M: int, N: int, output_root: str, exp_id: str
 ) -> Optional[pd.DataFrame]:
     """
     对所有风机逐一训练，保存结果，返回按时间戳对齐的汇总 DataFrame。
@@ -520,10 +541,9 @@ def run_turbine_forecast(
         m = compute_metrics(y_val, y_pred)
         print(
             f"  ✅ 风机 {tid} RMSE={m['RMSE']:.2f} | MAE={m['MAE']:.2f}"
-            f" | R²={m['R2']:.4f} | 耗时 {elapsed:.1f}s"
+            f" | R²={m['R2']:.4f} | NRMSE={m['NRMSE']:.4f} | 耗时 {elapsed:.1f}s"
         )
 
-        exp_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         turbine_dir = os.path.join(output_root, "turbine", model_name, f"turbine_{tid}")
 
         save_metrics(
@@ -592,7 +612,14 @@ def load_line_loss(line_loss_file: str) -> pd.DataFrame:
 def _get_line_loss(power: float, df_ll: pd.DataFrame) -> float:
     mask = (df_ll["min_power"] < power) & (power <= df_ll["max_power"])
     rows = df_ll[mask]
-    return float(rows.iloc[0]["line_loss"]) if not rows.empty else 0.0
+    if rows.empty:
+        warnings.warn(
+            f"功率值 {power:.4f} 超出线损查找表区间范围，默认线损返回 0.0",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    return float(rows.iloc[0]["line_loss"])
 
 
 def apply_line_loss_and_compare(
@@ -629,10 +656,12 @@ def apply_line_loss_and_compare(
     m_net = compute_metrics(y_true, df["NET_PREDICTED"].to_numpy())
 
     print(
-        f"  全局模型    → RMSE={m_global['RMSE']:.4f} | MAE={m_global['MAE']:.4f} | R²={m_global['R2']:.4f}"
+        f"  全局模型    → RMSE={m_global['RMSE']:.4f} | MAE={m_global['MAE']:.4f}"
+        f" | R²={m_global['R2']:.4f} | NRMSE={m_global['NRMSE']:.4f}"
     )
     print(
-        f"  分层净功率  → RMSE={m_net['RMSE']:.4f} | MAE={m_net['MAE']:.4f} | R²={m_net['R2']:.4f}"
+        f"  分层净功率  → RMSE={m_net['RMSE']:.4f} | MAE={m_net['MAE']:.4f}"
+        f" | R²={m_net['R2']:.4f} | NRMSE={m_net['NRMSE']:.4f}"
     )
 
     compare_dir = os.path.join(output_root, "comparison")
@@ -640,7 +669,7 @@ def apply_line_loss_and_compare(
 
     compare_csv = os.path.join(compare_dir, f"comparison_{model_name}_M{M}_N{N}.csv")
     with open(compare_csv, mode="w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["label", "RMSE", "MAE", "R2"])
+        writer = csv.DictWriter(f, fieldnames=["label"] + list(m_global.keys()))
         writer.writeheader()
         writer.writerow({"label": "全局模型预测", **m_global})
         writer.writerow({"label": "分层净功率（扣线损）", **m_net})
@@ -677,6 +706,10 @@ if __name__ == "__main__":
     else:
         print(f"⚠️  线损文件不存在，将跳过线损分析: {LINE_LOSS_FILE}")
 
+    # 本次实验 ID，贯穿所有模型与步长的输出，便于追溯同一批结果
+    exp_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    print(f"🆔 实验 ID: {exp_id}")
+
     for model_name in MODELS:
         print(f"\n{'#' * 60}")
         print(f"# 模型: {model_name}")
@@ -684,11 +717,11 @@ if __name__ == "__main__":
 
         for N in N_LIST:
             try:
-                # 1. 全局预测
-                run_global_forecast(df_raw.copy(), model_name, M, N, OUTPUT_ROOT)
+                # 1. 全局预测（dataset builder 内部通过 sort_values 生成局部副本，无需 .copy()）
+                run_global_forecast(df_raw, model_name, M, N, OUTPUT_ROOT, exp_id)
 
                 # 2. 单机预测
-                df_turbine_merged = run_turbine_forecast(df_raw.copy(), model_name, M, N, OUTPUT_ROOT)
+                df_turbine_merged = run_turbine_forecast(df_raw, model_name, M, N, OUTPUT_ROOT, exp_id)
 
                 # 3. 线损分析与对比
                 if df_ll is not None and df_turbine_merged is not None:
