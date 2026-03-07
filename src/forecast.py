@@ -4,6 +4,11 @@
 支持的模型 (Supported models):
     lightgbm, xgboost, random_forest, ridge, mlp, lstm
 
+设备支持 (Device Support):
+    LSTM 模型自动优先使用 GPU（CUDA），无 GPU 时回退到 CPU。
+    其他模型（lightgbm / xgboost / random_forest / ridge / mlp）使用 CPU 多核加速。
+    启动时会打印检测到的设备信息。
+
 运行方式：
     python forecast.py
 
@@ -25,7 +30,10 @@ import time
 import traceback
 import warnings
 from datetime import datetime
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch as _torch
 
 import numpy as np
 import pandas as pd
@@ -78,6 +86,42 @@ def ensure_dir(directory: str) -> None:
 def check_time_continuity(timestamps: pd.Series, max_gap_seconds: int) -> bool:
     diffs = timestamps.diff().dropna().dt.total_seconds()
     return bool((diffs <= max_gap_seconds).all())
+
+
+# 模块级设备缓存：None 表示尚未检测，首次调用 _get_torch_device() 时初始化
+_TORCH_DEVICE: "Optional[_torch.device]" = None
+
+
+def _get_torch_device() -> "torch.device":
+    """
+    懒加载并缓存 PyTorch 设备（优先 GPU，无 GPU 回退 CPU）。
+    首次调用时打印检测到的设备信息，后续调用直接返回缓存结果。
+
+    Raises:
+        ImportError: 若 PyTorch 未安装。
+    """
+    global _TORCH_DEVICE
+    if _TORCH_DEVICE is not None:
+        return _TORCH_DEVICE  # type: ignore[return-value]
+
+    try:
+        import torch
+    except ImportError:
+        raise ImportError("LSTM 模型需要 PyTorch，请运行: pip install torch")
+
+    if torch.cuda.is_available():
+        _TORCH_DEVICE = torch.device("cuda")
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_count = torch.cuda.device_count()
+        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(
+            f"🖥️  GPU 已启用: {gpu_name}（共 {gpu_count} 块，显存 {total_mem_gb:.1f} GB）"
+        )
+    else:
+        _TORCH_DEVICE = torch.device("cpu")
+        print("🖥️  未检测到可用 GPU，LSTM 将使用 CPU 训练")
+
+    return _TORCH_DEVICE  # type: ignore[return-value]
 
 
 # ============================================================
@@ -304,6 +348,7 @@ def _train_lstm(
     """
     使用 PyTorch 训练双层 LSTM 模型。
     输入特征被重塑为 (samples, M, 2) 的时序格式，训练前做 StandardScaler 归一化。
+    自动优先使用 GPU（CUDA），无 GPU 时回退到 CPU。
     需要安装 PyTorch：pip install torch
     """
     try:
@@ -313,8 +358,11 @@ def _train_lstm(
     except ImportError:
         raise ImportError("LSTM 模型需要 PyTorch，请运行: pip install torch")
 
+    # 使用全局缓存的设备（_get_torch_device 已在启动时调用过，这里直接取缓存）
+    device = _get_torch_device()
     torch.manual_seed(RANDOM_SEED)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(RANDOM_SEED)  # GPU 随机种子，确保可复现
     input_size = 2  # 每个时间步有 2 个特征
 
     # 归一化：仅在训练集拟合，再应用到验证集
@@ -687,6 +735,14 @@ def apply_line_loss_and_compare(
 if __name__ == "__main__":
     np.random.seed(RANDOM_SEED)
     random.seed(RANDOM_SEED)
+
+    # 提前检测 PyTorch 设备（GPU 优先），打印一次设备信息
+    # 若未安装 PyTorch 则仅跳过 LSTM，其他模型不受影响
+    if "lstm" in MODELS:
+        try:
+            _get_torch_device()
+        except ImportError as e:
+            print(f"⚠️  {e}（将跳过 lstm 模型）")
 
     ensure_dir(OUTPUT_ROOT)
 
