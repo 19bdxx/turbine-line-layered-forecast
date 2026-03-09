@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
@@ -472,7 +472,7 @@ def train_model(
 # ============================================================
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    rmse = float(root_mean_squared_error(y_true, y_pred))
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     mean_abs_true = float(np.mean(np.abs(y_true)))
     nrmse = rmse / mean_abs_true if mean_abs_true > 0 else float("nan")
     return {
@@ -631,7 +631,7 @@ def run_turbine_forecast(
 
     merged = all_pred_dfs[0]
     for df_p in all_pred_dfs[1:]:
-        merged = pd.merge(merged, df_p, on="timestamp", how="outer")
+        merged = pd.merge(merged, df_p, on="timestamp", how="inner")
     merged = merged.sort_values("timestamp").reset_index(drop=True)
 
     summary_path = os.path.join(
@@ -751,7 +751,7 @@ if __name__ == "__main__":
     df_raw = pd.read_csv(DATA_FILE)
     df_raw["timestamp"] = pd.to_datetime(df_raw["timestamp"], errors="coerce")
     df_raw = df_raw.dropna(subset=["timestamp"])
-    df_raw = df_raw[(df_raw["LIMIT_POWER"] == 0) | (df_raw["LIMIT_POWER"] >= 900)]
+    df_raw = df_raw[(df_raw["LIMIT_POWER"] == 0) | (df_raw["LIMIT_POWER"] >= 900)]  # 0=无限功限，≥900kW 视为限电可接受
     print(f"✅ 数据加载完成，共 {len(df_raw)} 行")
 
     # 加载线损表（文件不存在时跳过线损分析）
