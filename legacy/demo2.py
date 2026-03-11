@@ -1,3 +1,6 @@
+# ⚠️ 此文件已合并到 forecast.py，建议使用新文件（支持多模型）。
+# This file has been consolidated into forecast.py (multi-model support).
+
 import pandas as pd
 import numpy as np
 import lightgbm as lgb

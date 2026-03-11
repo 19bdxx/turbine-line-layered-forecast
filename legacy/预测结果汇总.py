@@ -1,3 +1,6 @@
+# ⚠️ 此文件已合并到 forecast.py（run_turbine_forecast 函数），建议使用新文件。
+# This file has been consolidated into forecast.py (run_turbine_forecast function).
+
 import os
 import pandas as pd
 
